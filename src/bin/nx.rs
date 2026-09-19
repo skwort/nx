@@ -1,27 +1,61 @@
-use nx::{AppPaths, CheckReport, CheckRequest, Config, check};
+use nx::{
+    AppPaths, CheckReport, CheckRequest, Config, DaemonRequest, DaemonResponse, LogMode, check,
+    init_logging,
+};
 use std::env;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use tracing::{debug, error, info};
+
+struct CliOptions {
+    request: CheckRequest,
+    report_verbose: bool,
+    log_verbosity: u8,
+    direct: bool,
+    socket: PathBuf,
+}
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("error: {error}");
+    let options = match parse_args() {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = init_logging(LogMode::Cli {
+        verbosity: options.log_verbosity,
+    }) {
+        eprintln!("error: failed to initialize logging: {error}");
+        std::process::exit(1);
+    }
+    if let Err(error) = run(options) {
+        error!(%error, "command failed");
         std::process::exit(1);
     }
 }
 
-fn run() -> nx::Result<()> {
-    let (request, verbose) = parse_args()?;
-    let report = check(&request)?;
-    print_report(&report, verbose);
+fn run(options: CliOptions) -> nx::Result<()> {
+    let report = if options.direct {
+        info!("running check directly");
+        check(&options.request)?
+    } else {
+        request_check(&options.socket, options.request)?
+    };
+    print_report(&report, options.report_verbose);
     Ok(())
 }
 
-fn parse_args() -> nx::Result<(CheckRequest, bool)> {
+fn parse_args() -> nx::Result<CliOptions> {
     let mut args = env::args().skip(1);
     let mut flake = None;
     let mut host = None;
     let mut offline = false;
-    let mut verbose = false;
+    let mut report_verbose = false;
+    let mut log_verbosity = 0_u8;
+    let mut direct = false;
+    let mut socket = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -31,10 +65,18 @@ fn parse_args() -> nx::Result<(CheckRequest, bool)> {
                 host = Some(args.next().ok_or("--configuration needs a name")?)
             }
             "--offline" => offline = true,
-            "--verbose" => verbose = true,
+            "--verbose" => {
+                report_verbose = true;
+                log_verbosity = log_verbosity.max(1);
+            }
+            "-v" => log_verbosity = log_verbosity.saturating_add(1),
+            "-vv" => log_verbosity = log_verbosity.saturating_add(2),
+            "-vvv" => log_verbosity = log_verbosity.saturating_add(3),
+            "--direct" => direct = true,
+            "--socket" => socket = Some(PathBuf::from(args.next().ok_or("--socket needs a path")?)),
             "-h" | "--help" => {
                 println!(
-                    "Usage: nx update check [--flake PATH] [--configuration NAME] [--offline] [--verbose]"
+                    "Usage: nx update check [--flake PATH] [--configuration NAME] [--offline] [--verbose] [-v|-vv] [--direct] [--socket PATH]"
                 );
                 std::process::exit(0);
             }
@@ -45,8 +87,8 @@ fn parse_args() -> nx::Result<(CheckRequest, bool)> {
     let paths = AppPaths::discover()?;
     let config = Config::load(&paths.config_file)?;
 
-    Ok((
-        CheckRequest {
+    Ok(CliOptions {
+        request: CheckRequest {
             flake: flake
                 .or(config.system.flake)
                 .ok_or("flake path is required: use --flake or set system.flake in config.toml")?,
@@ -55,8 +97,34 @@ fn parse_args() -> nx::Result<(CheckRequest, bool)> {
             )?,
             offline,
         },
-        verbose,
-    ))
+        report_verbose,
+        log_verbosity,
+        direct,
+        socket: socket.or(config.daemon.socket).unwrap_or(paths.socket),
+    })
+}
+
+fn request_check(socket: &PathBuf, request: CheckRequest) -> nx::Result<CheckReport> {
+    info!(socket = %socket.display(), "requesting check from daemon");
+    let mut stream = UnixStream::connect(socket).map_err(|error| {
+        format!(
+            "cannot connect to daemon at {}: {error}; start nxd or use --direct",
+            socket.display()
+        )
+    })?;
+    serde_json::to_writer(&mut stream, &DaemonRequest::Check(request))?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    debug!(bytes = line.len(), "received daemon response");
+    let response: DaemonResponse = serde_json::from_str(&line)?;
+    match (response.ok, response.report, response.error) {
+        (true, Some(report), _) => Ok(report),
+        (false, _, Some(error)) => Err(error.into()),
+        _ => Err("daemon returned an invalid response".into()),
+    }
 }
 
 fn print_report(report: &CheckReport, verbose: bool) {

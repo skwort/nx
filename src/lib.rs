@@ -5,11 +5,16 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
+use tracing::{debug, info};
 
 mod cache;
 mod config;
+mod logging;
+mod protocol;
 
 pub use config::{AppPaths, Config};
+pub use logging::{LogMode, init_logging};
+pub use protocol::{DaemonRequest, DaemonResponse};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -40,17 +45,26 @@ pub fn check(request: &CheckRequest) -> Result<CheckReport> {
     if !source.join("flake.nix").is_file() {
         return Err(format!("{} does not contain flake.nix", source.display()).into());
     }
+    info!(
+        flake = %source.display(),
+        configuration = %request.host,
+        offline = request.offline,
+        "starting update check"
+    );
 
     let temp = TempDir::new()?;
     let before_dir = temp.path().join("before");
     let after_dir = temp.path().join("after");
     copy_tree(&source, &before_dir)?;
     copy_tree(&source, &after_dir)?;
+    debug!(directory = %temp.path().display(), "created configuration snapshots");
+    info!("updating temporary after snapshot");
     nix_flake_update(&after_dir, request.offline)?;
 
     let cache_dir = AppPaths::discover()?.cache_dir.join("systems");
     let before = evaluate(&before_dir, &request.host, request.offline, &cache_dir)?;
     let after = evaluate(&after_dir, &request.host, request.offline, &cache_dir)?;
+    info!("completed update check");
     Ok(CheckReport { before, after })
 }
 
@@ -76,12 +90,15 @@ fn nix_flake_update(path: &Path, offline: bool) -> Result<()> {
 }
 
 fn evaluate(path: &Path, host: &str, offline: bool, cache_dir: &Path) -> Result<SystemState> {
+    debug!(snapshot = %path.display(), "reading flake metadata");
     let metadata_raw = nix_metadata(path, offline)?;
     let metadata: Value = serde_json::from_str(&metadata_raw)?;
     let cache_key = cache::key(&metadata, host)?;
     if let Some(state) = cache::load(cache_dir, &cache_key)? {
+        info!(cache_key = %cache_key, "using cached system state");
         return Ok(state);
     }
+    info!(cache_key = %cache_key, "evaluating system state");
 
     let target = format!("path:{}#nixosConfigurations.{host}.config", path.display());
     let system_drv = nix_eval(&target, ".system.build.toplevel.drvPath", "--raw", offline)?;
@@ -99,10 +116,12 @@ fn evaluate(path: &Path, host: &str, offline: bool, cache_dir: &Path) -> Result<
         system_drv,
     };
     cache::store(cache_dir, &cache_key, &state)?;
+    debug!(cache_key = %cache_key, "cached system state");
     Ok(state)
 }
 
 fn nix_eval(target: &str, attribute: &str, mode: &str, offline: bool) -> Result<String> {
+    debug!(attribute, "running nix eval");
     let mut command = Command::new("nix");
     add_common_args(&mut command, offline);
     let output = command
@@ -121,6 +140,7 @@ fn nix_eval(target: &str, attribute: &str, mode: &str, offline: bool) -> Result<
 }
 
 fn nix_eval_packages(target: &str, offline: bool) -> Result<String> {
+    debug!("evaluating declared packages");
     let mut command = Command::new("nix");
     add_common_args(&mut command, offline);
     let output = command
