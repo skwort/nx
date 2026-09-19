@@ -1,0 +1,16 @@
+# Rust
+/target/
+
+# Nix and direnv
+/.direnv/
+/result
+/result-*
+.envrc
+
+# Generated reports
+/output.test
+
+# Editor and OS files
+.DS_Store
+*.swp
+*.swo

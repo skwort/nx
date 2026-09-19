@@ -1,0 +1,38 @@
+[
+  {
+    "name": "alpha-1.0",
+    "pname": "alpha",
+    "version": "1.0",
+    "outputPath": "/nix/store/old-alpha-1.0"
+  },
+  {
+    "name": "alpha-1.0",
+    "pname": "alpha",
+    "version": "1.0",
+    "outputPath": "/nix/store/old-alpha-1.0"
+  },
+  {
+    "name": "multi-1.0",
+    "pname": "multi",
+    "version": "1.0",
+    "outputPath": "/nix/store/old-multi-1.0"
+  },
+  {
+    "name": "multi-2.0",
+    "pname": "multi",
+    "version": "2.0",
+    "outputPath": "/nix/store/old-multi-2.0"
+  },
+  {
+    "name": "removed-1.0",
+    "pname": "removed",
+    "version": "1.0",
+    "outputPath": "/nix/store/old-removed-1.0"
+  },
+  {
+    "name": "unknown",
+    "pname": null,
+    "version": null,
+    "outputPath": "/nix/store/old-unknown"
+  }
+]
