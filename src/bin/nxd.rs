@@ -1,13 +1,34 @@
 use nx::{
-    AppPaths, Config, DaemonRequest, DaemonResponse, LogMode, check, init_logging,
-    load_latest_report,
+    AppPaths, CheckRequest, Config, DaemonRequest, DaemonResponse, LogMode, ReportTarget, check,
+    init_logging, load_latest_report,
 };
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use tracing::{error, info, warn};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
+
+const STARTUP_DELAY: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone, Default)]
+struct CheckWorker {
+    gate: Arc<Mutex<()>>,
+}
+
+impl CheckWorker {
+    fn run(&self, request: &CheckRequest) -> nx::Result<nx::CheckReport> {
+        debug!("waiting for check worker");
+        let _guard = self
+            .gate
+            .lock()
+            .map_err(|_| "check worker lock is poisoned")?;
+        check(request)
+    }
+}
 
 fn main() {
     if let Err(error) = init_logging(LogMode::Daemon) {
@@ -24,8 +45,9 @@ fn run() -> nx::Result<()> {
     let socket_override = parse_socket()?;
     let paths = AppPaths::discover()?;
     let config = Config::load(&paths.config_file)?;
+    let check_interval = config.daemon.interval()?;
     let socket = socket_override
-        .or(config.daemon.socket)
+        .or(config.daemon.socket.clone())
         .unwrap_or(paths.socket);
 
     if let Some(parent) = socket.parent() {
@@ -35,12 +57,30 @@ fn run() -> nx::Result<()> {
     let listener = UnixListener::bind(&socket)?;
     info!(socket = %socket.display(), "daemon listening");
 
+    let worker = CheckWorker::default();
+    if let Some(interval) = check_interval {
+        let request = CheckRequest {
+            flake: config
+                .system
+                .flake
+                .ok_or("system.flake is required when daemon.check_interval is configured")?,
+            host: config.system.configuration.ok_or(
+                "system.configuration is required when daemon.check_interval is configured",
+            )?,
+            offline: false,
+        };
+        start_scheduler(worker.clone(), request, interval);
+    }
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = handle(stream) {
-                    error!(%error, "request failed");
-                }
+                let worker = worker.clone();
+                thread::spawn(move || {
+                    if let Err(error) = handle(stream, &worker) {
+                        error!(%error, "request failed");
+                    }
+                });
             }
             Err(error) => error!(%error, "failed to accept connection"),
         }
@@ -66,7 +106,7 @@ fn parse_socket() -> nx::Result<Option<PathBuf>> {
     Ok(socket)
 }
 
-fn handle(stream: UnixStream) -> nx::Result<()> {
+fn handle(stream: UnixStream, worker: &CheckWorker) -> nx::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -77,7 +117,7 @@ fn handle(stream: UnixStream) -> nx::Result<()> {
                 configuration = %request.host,
                 "received check request"
             );
-            match check(&request) {
+            match worker.run(&request) {
                 Ok(report) => DaemonResponse::success(report),
                 Err(error) => {
                     warn!(%error, "check failed");
@@ -113,4 +153,35 @@ fn handle(stream: UnixStream) -> nx::Result<()> {
     serde_json::to_writer(&mut stream, &response)?;
     stream.write_all(b"\n")?;
     Ok(())
+}
+
+fn start_scheduler(worker: CheckWorker, request: CheckRequest, interval: Duration) {
+    thread::spawn(move || {
+        let target = ReportTarget {
+            flake: request.flake.clone(),
+            configuration: request.host.clone(),
+        };
+        info!(
+            interval_seconds = interval.as_secs(),
+            startup_delay_seconds = STARTUP_DELAY.as_secs(),
+            flake = %target.flake.display(),
+            configuration = %target.configuration,
+            "update scheduler started"
+        );
+        info!(
+            seconds = STARTUP_DELAY.as_secs(),
+            "first update check scheduled"
+        );
+        thread::sleep(STARTUP_DELAY);
+
+        loop {
+            info!("starting scheduled update check");
+            match worker.run(&request) {
+                Ok(_) => info!("scheduled update check completed"),
+                Err(error) => warn!(%error, "scheduled update check failed"),
+            }
+            info!(seconds = interval.as_secs(), "next update check scheduled");
+            thread::sleep(interval);
+        }
+    });
 }

@@ -4,3 +4,4 @@ configuration = "test-system"
 
 [daemon]
 socket = "/tmp/nx-test.sock"
+check_interval = "6h"
