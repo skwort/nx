@@ -11,10 +11,12 @@ mod cache;
 mod config;
 mod logging;
 mod protocol;
+mod report_store;
 
 pub use config::{AppPaths, Config};
 pub use logging::{LogMode, init_logging};
 pub use protocol::{DaemonRequest, DaemonResponse};
+pub use report_store::{ReportTarget, load_latest_report};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -28,6 +30,7 @@ pub struct CheckRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckReport {
+    pub checked_at: u64,
     pub before: SystemState,
     pub after: SystemState,
 }
@@ -61,11 +64,20 @@ pub fn check(request: &CheckRequest) -> Result<CheckReport> {
     info!("updating temporary after snapshot");
     nix_flake_update(&after_dir, request.offline)?;
 
-    let cache_dir = AppPaths::discover()?.cache_dir.join("systems");
+    let paths = AppPaths::discover()?;
+    let cache_dir = paths.cache_dir.join("systems");
     let before = evaluate(&before_dir, &request.host, request.offline, &cache_dir)?;
     let after = evaluate(&after_dir, &request.host, request.offline, &cache_dir)?;
+    let report = CheckReport {
+        checked_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        before,
+        after,
+    };
+    report_store::store(&paths.cache_dir.join("reports"), request, &report)?;
     info!("completed update check");
-    Ok(CheckReport { before, after })
+    Ok(report)
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<()> {

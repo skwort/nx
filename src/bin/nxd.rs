@@ -1,4 +1,7 @@
-use nx::{AppPaths, Config, DaemonRequest, DaemonResponse, LogMode, check, init_logging};
+use nx::{
+    AppPaths, Config, DaemonRequest, DaemonResponse, LogMode, check, init_logging,
+    load_latest_report,
+};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -47,12 +50,11 @@ fn run() -> nx::Result<()> {
 
 fn parse_socket() -> nx::Result<Option<PathBuf>> {
     let mut args = env::args().skip(1);
+    let mut socket = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--socket" => {
-                return Ok(Some(PathBuf::from(
-                    args.next().ok_or("--socket needs a path")?,
-                )));
+                socket = Some(PathBuf::from(args.next().ok_or("--socket needs a path")?));
             }
             "-h" | "--help" => {
                 println!("Usage: nxd [--socket PATH]");
@@ -61,7 +63,7 @@ fn parse_socket() -> nx::Result<Option<PathBuf>> {
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
-    Ok(None)
+    Ok(socket)
 }
 
 fn handle(stream: UnixStream) -> nx::Result<()> {
@@ -79,6 +81,25 @@ fn handle(stream: UnixStream) -> nx::Result<()> {
                 Ok(report) => DaemonResponse::success(report),
                 Err(error) => {
                     warn!(%error, "check failed");
+                    DaemonResponse::failure(error.to_string())
+                }
+            }
+        }
+        Ok(DaemonRequest::List(target)) => {
+            info!(
+                flake = %target.flake.display(),
+                configuration = %target.configuration,
+                "received list request"
+            );
+            match load_latest_report(&target) {
+                Ok(Some(report)) => DaemonResponse::success(report),
+                Ok(None) => DaemonResponse::failure(format!(
+                    "no update report found for {}#{}; run `nx update check` first",
+                    target.flake.display(),
+                    target.configuration
+                )),
+                Err(error) => {
+                    warn!(%error, "failed to load report");
                     DaemonResponse::failure(error.to_string())
                 }
             }

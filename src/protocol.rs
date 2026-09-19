@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CheckReport, CheckRequest};
+use crate::{CheckReport, CheckRequest, ReportTarget};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command")]
 pub enum DaemonRequest {
     #[serde(rename = "check")]
     Check(CheckRequest),
+    #[serde(rename = "list")]
+    List(ReportTarget),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
