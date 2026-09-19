@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+mod cache;
 mod config;
 
 pub use config::{AppPaths, Config};
@@ -47,8 +48,9 @@ pub fn check(request: &CheckRequest) -> Result<CheckReport> {
     copy_tree(&source, &after_dir)?;
     nix_flake_update(&after_dir, request.offline)?;
 
-    let before = evaluate(&before_dir, &request.host, request.offline)?;
-    let after = evaluate(&after_dir, &request.host, request.offline)?;
+    let cache_dir = AppPaths::discover()?.cache_dir.join("systems");
+    let before = evaluate(&before_dir, &request.host, request.offline, &cache_dir)?;
+    let after = evaluate(&after_dir, &request.host, request.offline, &cache_dir)?;
     Ok(CheckReport { before, after })
 }
 
@@ -73,7 +75,14 @@ fn nix_flake_update(path: &Path, offline: bool) -> Result<()> {
     ensure_success(output, "update temporary flake").map(|_| ())
 }
 
-fn evaluate(path: &Path, host: &str, offline: bool) -> Result<SystemState> {
+fn evaluate(path: &Path, host: &str, offline: bool, cache_dir: &Path) -> Result<SystemState> {
+    let metadata_raw = nix_metadata(path, offline)?;
+    let metadata: Value = serde_json::from_str(&metadata_raw)?;
+    let cache_key = cache::key(&metadata, host)?;
+    if let Some(state) = cache::load(cache_dir, &cache_key)? {
+        return Ok(state);
+    }
+
     let target = format!("path:{}#nixosConfigurations.{host}.config", path.display());
     let system_drv = nix_eval(&target, ".system.build.toplevel.drvPath", "--raw", offline)?;
     let kernel = nix_eval(
@@ -83,14 +92,14 @@ fn evaluate(path: &Path, host: &str, offline: bool) -> Result<SystemState> {
         offline,
     )?;
     let packages = nix_eval_packages(&target, offline)?;
-    let inputs = nix_metadata(path, offline)?;
-
-    Ok(SystemState {
+    let state = SystemState {
         kernel,
         packages: parse_declared_packages(&packages)?,
-        inputs: parse_inputs(&inputs),
+        inputs: parse_inputs(&metadata),
         system_drv,
-    })
+    };
+    cache::store(cache_dir, &cache_key, &state)?;
+    Ok(state)
 }
 
 fn nix_eval(target: &str, attribute: &str, mode: &str, offline: bool) -> Result<String> {
@@ -176,11 +185,11 @@ pub fn parse_declared_packages(raw: &str) -> Result<BTreeMap<String, BTreeSet<St
     Ok(packages)
 }
 
-fn parse_inputs(raw: &str) -> BTreeMap<String, String> {
+fn parse_inputs(metadata: &Value) -> BTreeMap<String, String> {
     let mut inputs = BTreeMap::new();
-    let Some(nodes) = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|metadata| metadata.get("locks").cloned())
+    let Some(nodes) = metadata
+        .get("locks")
+        .cloned()
         .and_then(|locks| locks.get("nodes").cloned())
         .and_then(|nodes| nodes.as_object().cloned())
     else {
