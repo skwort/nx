@@ -5,3 +5,8 @@ configuration = "test-system"
 [daemon]
 socket = "/tmp/nx-test.sock"
 check_interval = "6h"
+startup_delay = "60s"
+
+[notifications]
+enabled = true
+view_command = ["kitty", "--hold", "nx", "update", "list"]

@@ -35,6 +35,8 @@ pub struct Config {
     pub system: SystemConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub notifications: NotificationConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -47,15 +49,44 @@ pub struct SystemConfig {
 pub struct DaemonConfig {
     pub socket: Option<PathBuf>,
     pub check_interval: Option<String>,
+    pub startup_delay: Option<String>,
 }
 
 impl DaemonConfig {
     pub fn interval(&self) -> Result<Option<Duration>> {
         self.check_interval
             .as_deref()
-            .map(parse_duration)
+            .map(|value| parse_duration("check_interval", value))
             .transpose()
     }
+
+    pub fn startup_delay(&self) -> Result<Duration> {
+        self.startup_delay
+            .as_deref()
+            .map(|value| parse_duration("startup_delay", value))
+            .transpose()
+            .map(|duration| duration.unwrap_or(Duration::from_secs(60)))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    #[serde(default = "notifications_enabled")]
+    pub enabled: bool,
+    pub view_command: Option<Vec<String>>,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            view_command: None,
+        }
+    }
+}
+
+fn notifications_enabled() -> bool {
+    true
 }
 
 impl Config {
@@ -68,15 +99,15 @@ impl Config {
     }
 }
 
-fn parse_duration(value: &str) -> Result<Duration> {
+fn parse_duration(field: &str, value: &str) -> Result<Duration> {
     let value = value.trim();
     let split = value
         .find(|character: char| !character.is_ascii_digit())
-        .ok_or("check_interval requires a unit: s, m, h, or d")?;
+        .ok_or_else(|| format!("{field} requires a unit: s, m, h, or d"))?;
     let (amount, unit) = value.split_at(split);
     let amount: u64 = amount.parse()?;
     if amount == 0 {
-        return Err("check_interval must be greater than zero".into());
+        return Err(format!("{field} must be greater than zero").into());
     }
     let seconds = match unit {
         "s" => Some(amount),
@@ -85,7 +116,7 @@ fn parse_duration(value: &str) -> Result<Duration> {
         "d" => amount.checked_mul(24 * 60 * 60),
         _ => None,
     }
-    .ok_or("invalid check_interval; use a number followed by s, m, h, or d")?;
+    .ok_or_else(|| format!("invalid {field}; use a number followed by s, m, h, or d"))?;
     Ok(Duration::from_secs(seconds))
 }
 
@@ -96,15 +127,24 @@ mod tests {
 
     #[test]
     fn parses_check_intervals() {
-        assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(1_800));
-        assert_eq!(parse_duration("6h").unwrap(), Duration::from_secs(21_600));
-        assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86_400));
+        assert_eq!(
+            parse_duration("test", "30m").unwrap(),
+            Duration::from_secs(1_800)
+        );
+        assert_eq!(
+            parse_duration("test", "6h").unwrap(),
+            Duration::from_secs(21_600)
+        );
+        assert_eq!(
+            parse_duration("test", "1d").unwrap(),
+            Duration::from_secs(86_400)
+        );
     }
 
     #[test]
     fn rejects_invalid_check_intervals() {
         for value in ["0h", "6", "soon", "1 hour"] {
-            assert!(parse_duration(value).is_err(), "accepted {value}");
+            assert!(parse_duration("test", value).is_err(), "accepted {value}");
         }
     }
 }

@@ -1,6 +1,6 @@
 use nx::{
     AppPaths, CheckRequest, Config, DaemonRequest, DaemonResponse, LogMode, ReportTarget, check,
-    init_logging, load_latest_report,
+    init_logging, load_latest_report, prepare_update_notification, show_notification,
 };
 use std::env;
 use std::fs;
@@ -11,8 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
-
-const STARTUP_DELAY: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Default)]
 struct CheckWorker {
@@ -46,6 +44,7 @@ fn run() -> nx::Result<()> {
     let paths = AppPaths::discover()?;
     let config = Config::load(&paths.config_file)?;
     let check_interval = config.daemon.interval()?;
+    let startup_delay = config.daemon.startup_delay()?;
     let socket = socket_override
         .or(config.daemon.socket.clone())
         .unwrap_or(paths.socket);
@@ -69,7 +68,14 @@ fn run() -> nx::Result<()> {
             )?,
             offline: false,
         };
-        start_scheduler(worker.clone(), request, interval);
+        start_scheduler(
+            worker.clone(),
+            request,
+            startup_delay,
+            interval,
+            config.notifications.enabled,
+            config.notifications.view_command,
+        );
     }
 
     for stream in listener.incoming() {
@@ -155,7 +161,14 @@ fn handle(stream: UnixStream, worker: &CheckWorker) -> nx::Result<()> {
     Ok(())
 }
 
-fn start_scheduler(worker: CheckWorker, request: CheckRequest, interval: Duration) {
+fn start_scheduler(
+    worker: CheckWorker,
+    request: CheckRequest,
+    startup_delay: Duration,
+    interval: Duration,
+    notifications_enabled: bool,
+    view_command: Option<Vec<String>>,
+) {
     thread::spawn(move || {
         let target = ReportTarget {
             flake: request.flake.clone(),
@@ -163,21 +176,41 @@ fn start_scheduler(worker: CheckWorker, request: CheckRequest, interval: Duratio
         };
         info!(
             interval_seconds = interval.as_secs(),
-            startup_delay_seconds = STARTUP_DELAY.as_secs(),
+            startup_delay_seconds = startup_delay.as_secs(),
             flake = %target.flake.display(),
             configuration = %target.configuration,
             "update scheduler started"
         );
         info!(
-            seconds = STARTUP_DELAY.as_secs(),
+            seconds = startup_delay.as_secs(),
             "first update check scheduled"
         );
-        thread::sleep(STARTUP_DELAY);
+        thread::sleep(startup_delay);
+        let mut last_notified = None;
 
         loop {
             info!("starting scheduled update check");
             match worker.run(&request) {
-                Ok(_) => info!("scheduled update check completed"),
+                Ok(report) => {
+                    info!("scheduled update check completed");
+                    if notifications_enabled {
+                        match prepare_update_notification(&report) {
+                            Ok(Some(update))
+                                if last_notified.as_ref() != Some(&update.fingerprint) =>
+                            {
+                                match show_notification(&update, view_command.clone()) {
+                                    Ok(()) => last_notified = Some(update.fingerprint),
+                                    Err(error) => {
+                                        warn!(%error, "failed to send desktop notification")
+                                    }
+                                }
+                            }
+                            Ok(Some(_)) => debug!("update notification already sent"),
+                            Ok(None) => last_notified = None,
+                            Err(error) => warn!(%error, "failed to prepare desktop notification"),
+                        }
+                    }
+                }
                 Err(error) => warn!(%error, "scheduled update check failed"),
             }
             info!(seconds = interval.as_secs(), "next update check scheduled");

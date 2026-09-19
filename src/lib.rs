@@ -10,11 +10,13 @@ use tracing::{debug, info};
 mod cache;
 mod config;
 mod logging;
+mod notifications;
 mod protocol;
 mod report_store;
 
 pub use config::{AppPaths, Config};
 pub use logging::{LogMode, init_logging};
+pub use notifications::{UpdateNotification, prepare_update_notification, show_notification};
 pub use protocol::{DaemonRequest, DaemonResponse};
 pub use report_store::{ReportTarget, load_latest_report};
 

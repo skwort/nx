@@ -13,8 +13,17 @@ fn loads_system_and_daemon_defaults() {
         Some(Duration::from_secs(6 * 60 * 60))
     );
     assert_eq!(
+        config.daemon.startup_delay().unwrap(),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
         config.daemon.socket.unwrap(),
         Path::new("/tmp/nx-test.sock")
+    );
+    assert!(config.notifications.enabled);
+    assert_eq!(
+        config.notifications.view_command.unwrap(),
+        ["kitty", "--hold", "nx", "update", "list"]
     );
 }
 
@@ -26,4 +35,9 @@ fn missing_config_uses_empty_defaults() {
     assert!(config.system.configuration.is_none());
     assert!(config.daemon.socket.is_none());
     assert!(config.daemon.interval().unwrap().is_none());
+    assert_eq!(
+        config.daemon.startup_delay().unwrap(),
+        Duration::from_secs(60)
+    );
+    assert!(config.notifications.enabled);
 }
