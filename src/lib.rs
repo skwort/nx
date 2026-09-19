@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+mod config;
+
+pub use config::{AppPaths, Config};
+
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

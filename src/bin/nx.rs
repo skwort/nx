@@ -1,4 +1,4 @@
-use nx::{check, CheckReport, CheckRequest};
+use nx::{AppPaths, CheckReport, CheckRequest, Config, check};
 use std::env;
 use std::path::PathBuf;
 
@@ -27,21 +27,32 @@ fn parse_args() -> nx::Result<(CheckRequest, bool)> {
         match arg.as_str() {
             "update" | "check" => {}
             "--flake" => flake = Some(PathBuf::from(args.next().ok_or("--flake needs a path")?)),
-            "--host" => host = Some(args.next().ok_or("--host needs a configuration name")?),
+            "--configuration" | "--host" => {
+                host = Some(args.next().ok_or("--configuration needs a name")?)
+            }
             "--offline" => offline = true,
             "--verbose" => verbose = true,
             "-h" | "--help" => {
-                println!("Usage: nx update check --flake PATH --host NAME [--offline] [--verbose]");
+                println!(
+                    "Usage: nx update check [--flake PATH] [--configuration NAME] [--offline] [--verbose]"
+                );
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
 
+    let paths = AppPaths::discover()?;
+    let config = Config::load(&paths.config_file)?;
+
     Ok((
         CheckRequest {
-            flake: flake.ok_or("--flake is required")?,
-            host: host.ok_or("--host is required")?,
+            flake: flake
+                .or(config.system.flake)
+                .ok_or("flake path is required: use --flake or set system.flake in config.toml")?,
+            host: host.or(config.system.configuration).ok_or(
+                "configuration name is required: use --configuration or set system.configuration in config.toml",
+            )?,
             offline,
         },
         verbose,

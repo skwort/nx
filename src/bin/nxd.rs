@@ -1,4 +1,4 @@
-use nx::{check, CheckReport, CheckRequest};
+use nx::{AppPaths, CheckReport, CheckRequest, Config, check};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -28,7 +28,16 @@ fn main() {
 }
 
 fn run() -> nx::Result<()> {
-    let socket = parse_socket()?;
+    let socket_override = parse_socket()?;
+    let paths = AppPaths::discover()?;
+    let config = Config::load(&paths.config_file)?;
+    let socket = socket_override
+        .or(config.daemon.socket)
+        .unwrap_or(paths.socket);
+
+    if let Some(parent) = socket.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let _ = fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket)?;
     eprintln!("nxd listening on {}", socket.display());
@@ -39,19 +48,23 @@ fn run() -> nx::Result<()> {
     Ok(())
 }
 
-fn parse_socket() -> nx::Result<PathBuf> {
+fn parse_socket() -> nx::Result<Option<PathBuf>> {
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--socket" => return Ok(PathBuf::from(args.next().ok_or("--socket needs a path")?)),
+            "--socket" => {
+                return Ok(Some(PathBuf::from(
+                    args.next().ok_or("--socket needs a path")?,
+                )));
+            }
             "-h" | "--help" => {
-                println!("Usage: nxd --socket PATH");
+                println!("Usage: nxd [--socket PATH]");
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
-    Err("--socket is required".into())
+    Ok(None)
 }
 
 fn handle(stream: UnixStream) -> nx::Result<()> {

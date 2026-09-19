@@ -1,0 +1,6 @@
+[system]
+flake = "/etc/nixos"
+configuration = "test-system"
+
+[daemon]
+socket = "/tmp/nx-test.sock"
