@@ -1,30 +1,50 @@
 {
   description = "nx — update awareness for NixOS";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
-  outputs = { nixpkgs, ... }:
-    let
+    flake-parts = {
+      url = "github:hercules-ci/flake-parts";
+      inputs.nixpkgs-lib.follows = "nixpkgs";
+    };
+  };
+
+  outputs =
+    inputs@{
+      self,
+      flake-parts,
+      ...
+    }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [
-        "aarch64-darwin"
         "aarch64-linux"
-        "x86_64-darwin"
         "x86_64-linux"
       ];
 
-      forAllSystems = f:
-        nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
-    in
-    {
-      devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell {
-          packages = with pkgs; [
-            cargo
-            clippy
-            rustc
-            rustfmt
-          ];
+      perSystem =
+        { lib, pkgs, ... }:
+        {
+          packages = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux rec {
+            nx = pkgs.callPackage ./nix/package.nix { };
+            default = nx;
+          };
+
+          devShells.default = pkgs.mkShell {
+            packages = with pkgs; [
+              cargo
+              clippy
+              rustc
+              rustfmt
+            ];
+          };
+
+          formatter = pkgs.nixfmt;
         };
-      });
+
+      flake.nixosModules = rec {
+        nx = import ./nix/module.nix { inherit self; };
+        default = nx;
+      };
     };
 }
