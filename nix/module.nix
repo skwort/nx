@@ -86,7 +86,6 @@ in
         type = lib.types.listOf lib.types.str;
         default = [
           "${pkgs.kitty}/bin/kitty"
-          "--hold"
           "nx"
           "update"
           "list"

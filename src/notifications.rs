@@ -62,10 +62,30 @@ pub fn show_notification(
     update: &UpdateNotification,
     view_command: Option<Vec<String>>,
 ) -> Result<()> {
+    show_notification_with_summary(update, view_command, "NixOS updates available", false)
+}
+
+#[cfg(debug_assertions)]
+pub fn show_test_notification(
+    update: &UpdateNotification,
+    view_command: Vec<String>,
+) -> Result<()> {
+    if view_command.is_empty() {
+        return Err("test notification requires a view command".into());
+    }
+    show_notification_with_summary(update, Some(view_command), "nx test notification", true)
+}
+
+fn show_notification_with_summary(
+    update: &UpdateNotification,
+    view_command: Option<Vec<String>>,
+    summary: &str,
+    wait_for_action: bool,
+) -> Result<()> {
     let mut notification = Notification::new();
     notification
         .appname("nx")
-        .summary("NixOS updates available")
+        .summary(summary)
         .body(&update.body)
         .icon("software-update-available")
         .urgency(Urgency::Normal);
@@ -80,7 +100,7 @@ pub fn show_notification(
     info!("desktop update notification sent");
 
     if let Some(command) = view_command {
-        thread::spawn(move || {
+        let wait = move || {
             handle.wait_for_action(|action| {
                 if matches!(action, "default" | "view") {
                     let mut process = Command::new(&command[0]);
@@ -90,7 +110,12 @@ pub fn show_notification(
                     }
                 }
             });
-        });
+        };
+        if wait_for_action {
+            wait();
+        } else {
+            thread::spawn(wait);
+        }
     }
     Ok(())
 }

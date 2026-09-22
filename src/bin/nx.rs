@@ -2,11 +2,14 @@ use nx::{
     AppPaths, CheckReport, CheckRequest, Config, DaemonRequest, DaemonResponse, LogMode,
     ReportTarget, check, init_logging, load_latest_report,
 };
+#[cfg(debug_assertions)]
+use nx::{UpdateNotification, prepare_update_notification, show_test_notification};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,12 +19,15 @@ use tracing::{debug, error, info};
 enum CliCommand {
     Check,
     List,
+    #[cfg(debug_assertions)]
+    TestNotification,
 }
 
 struct CliOptions {
     command: CliCommand,
     request: CheckRequest,
     report_verbose: bool,
+    no_pager: bool,
     log_verbosity: u8,
     direct: bool,
     socket: PathBuf,
@@ -140,6 +146,35 @@ fn run(options: CliOptions) -> nx::Result<()> {
         flake: options.request.flake.clone(),
         configuration: options.request.host.clone(),
     };
+    #[cfg(debug_assertions)]
+    if matches!(options.command, CliCommand::TestNotification) {
+        let report = load_latest_report(&target)?.ok_or_else(|| {
+            format!(
+                "no update report found for {}#{}; run `nx update check` first",
+                target.flake.display(),
+                target.configuration
+            )
+        })?;
+        let update = prepare_update_notification(&report)?.unwrap_or(UpdateNotification {
+            fingerprint: String::new(),
+            body: "No updates in the latest cached report".to_owned(),
+        });
+        let command = vec![
+            "kitty".to_owned(),
+            "--title".to_owned(),
+            "nx updates (test)".to_owned(),
+            env::current_exe()?.to_string_lossy().into_owned(),
+            "update".to_owned(),
+            "list".to_owned(),
+            "--direct".to_owned(),
+            "--flake".to_owned(),
+            target.flake.to_string_lossy().into_owned(),
+            "--configuration".to_owned(),
+            target.configuration,
+        ];
+        println!("Sending test notification; choose View changes or dismiss it to finish.");
+        return show_test_notification(&update, command);
+    }
     let report = if options.direct {
         match options.command {
             CliCommand::Check => {
@@ -153,16 +188,20 @@ fn run(options: CliOptions) -> nx::Result<()> {
                     target.configuration
                 )
             })?,
+            #[cfg(debug_assertions)]
+            CliCommand::TestNotification => unreachable!(),
         }
     } else {
         let request = match options.command {
             CliCommand::Check => DaemonRequest::Check(options.request),
             CliCommand::List => DaemonRequest::List(target),
+            #[cfg(debug_assertions)]
+            CliCommand::TestNotification => unreachable!(),
         };
         request_daemon(&options.socket, request)?
     };
     drop(spinner);
-    print_report(&report, options.report_verbose);
+    display_report(&report, options.report_verbose, options.no_pager)?;
     Ok(())
 }
 
@@ -173,6 +212,7 @@ fn parse_args() -> nx::Result<CliOptions> {
     let mut host = None;
     let mut offline = false;
     let mut report_verbose = false;
+    let mut no_pager = false;
     let mut log_verbosity = 0_u8;
     let mut direct = false;
     let mut socket = None;
@@ -181,11 +221,16 @@ fn parse_args() -> nx::Result<CliOptions> {
         match arg.as_str() {
             "update" | "check" => {}
             "list" => command = CliCommand::List,
+            #[cfg(debug_assertions)]
+            "notification" if args.next().as_deref() == Some("test") => {
+                command = CliCommand::TestNotification;
+            }
             "--flake" => flake = Some(PathBuf::from(args.next().ok_or("--flake needs a path")?)),
             "--configuration" | "--host" => {
                 host = Some(args.next().ok_or("--configuration needs a name")?)
             }
             "--offline" => offline = true,
+            "--no-pager" => no_pager = true,
             "--verbose" => {
                 report_verbose = true;
                 log_verbosity = log_verbosity.max(1);
@@ -196,8 +241,11 @@ fn parse_args() -> nx::Result<CliOptions> {
             "--direct" => direct = true,
             "--socket" => socket = Some(PathBuf::from(args.next().ok_or("--socket needs a path")?)),
             "-h" | "--help" => {
+                println!("Usage:\n  nx update check [OPTIONS]\n  nx update list [OPTIONS]");
+                #[cfg(debug_assertions)]
+                println!("  nx notification test [OPTIONS]");
                 println!(
-                    "Usage:\n  nx update check [OPTIONS]\n  nx update list [OPTIONS]\n\nOptions:\n  --flake PATH\n  --configuration NAME\n  --offline\n  --verbose\n  -v, -vv\n  --direct\n  --socket PATH"
+                    "\nOptions:\n  --flake PATH\n  --configuration NAME\n  --offline\n  --verbose\n  --no-pager\n  -v, -vv\n  --direct\n  --socket PATH"
                 );
                 std::process::exit(0);
             }
@@ -220,6 +268,7 @@ fn parse_args() -> nx::Result<CliOptions> {
             offline,
         },
         report_verbose,
+        no_pager,
         log_verbosity,
         direct,
         socket: socket.or(config.daemon.socket).unwrap_or(paths.socket),
@@ -249,70 +298,135 @@ fn request_daemon(socket: &PathBuf, request: DaemonRequest) -> nx::Result<CheckR
     }
 }
 
-fn print_report(report: &CheckReport, verbose: bool) {
+fn display_report(report: &CheckReport, verbose: bool, no_pager: bool) -> nx::Result<()> {
+    let interactive = io::stdout().is_terminal();
     let colours = Colours {
-        enabled: std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
+        enabled: interactive && env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()),
     };
+    let mut output = Vec::new();
+    render_report(&mut output, report, verbose, &colours)?;
+    if interactive && !no_pager {
+        page_report(&output)
+    } else {
+        io::stdout().write_all(&output)?;
+        Ok(())
+    }
+}
+
+fn page_report(output: &[u8]) -> nx::Result<()> {
+    let pager = env::var("PAGER").unwrap_or_default();
+    let mut command = if pager.trim().is_empty() {
+        let mut command = Command::new("less");
+        command.arg("-R");
+        command
+    } else {
+        let parts = shlex::split(&pager).ok_or("invalid PAGER command")?;
+        let (program, args) = parts.split_first().ok_or("PAGER command is empty")?;
+        let mut command = Command::new(program);
+        if std::path::Path::new(program).file_name() == Some(std::ffi::OsStr::new("less")) {
+            command.arg("-R");
+        }
+        command.args(args);
+        command
+    };
+    let mut child = command.stdin(Stdio::piped()).spawn()?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or("pager stdin is unavailable")?
+        .write_all(output);
+    let status = child.wait()?;
+    if let Err(error) = write_result
+        && error.kind() != io::ErrorKind::BrokenPipe
+    {
+        return Err(error.into());
+    }
+    if !status.success() {
+        return Err(format!("pager exited with {status}").into());
+    }
+    Ok(())
+}
+
+fn render_report<W: Write>(
+    output: &mut W,
+    report: &CheckReport,
+    verbose: bool,
+    colours: &Colours,
+) -> io::Result<()> {
     let input_counts = map_change_counts(&report.before.inputs, &report.after.inputs);
     let package_counts = map_change_counts(&report.before.packages, &report.after.packages);
 
-    println!(
+    writeln!(
+        output,
         "{}\n",
         colours.paint("2", format!("Checked {}", display_age(report.checked_at)))
-    );
-    println!("{}", colours.heading("Summary"));
+    )?;
+    writeln!(output, "{}", colours.heading("Summary"))?;
     if report.before.kernel == report.after.kernel {
-        println!("  Kernel   {} (unchanged)", report.before.kernel);
+        writeln!(output, "  Kernel   {} (unchanged)", report.before.kernel)?;
     } else {
-        println!(
+        writeln!(
+            output,
             "  Kernel   {} {} {}",
             report.before.kernel,
             colours.paint("2", "→"),
             report.after.kernel
-        );
+        )?;
     }
-    println!("  Inputs   {}", display_counts(&input_counts));
-    println!("  Packages {}", display_counts(&package_counts));
-    println!(
+    writeln!(output, "  Inputs   {}", display_counts(&input_counts))?;
+    writeln!(output, "  Packages {}", display_counts(&package_counts))?;
+    writeln!(
+        output,
         "  System   {}",
         if report.before.system_drv == report.after.system_drv {
             "unchanged"
         } else {
             "changed"
         }
-    );
+    )?;
 
-    print_input_changes(report, verbose, &colours);
-    print_package_changes(report, &colours);
+    print_input_changes(output, report, verbose, colours)?;
+    print_package_changes(output, report, colours)
 }
 
-fn print_input_changes(report: &CheckReport, verbose: bool, colours: &Colours) {
+fn print_input_changes<W: Write>(
+    output: &mut W,
+    report: &CheckReport,
+    verbose: bool,
+    colours: &Colours,
+) -> io::Result<()> {
     let changes = map_changes(&report.before.inputs, &report.after.inputs);
     if changes.is_empty() {
-        return;
+        return Ok(());
     }
-    println!("\n{}", colours.heading("Flake inputs"));
+    writeln!(output, "\n{}", colours.heading("Flake inputs"))?;
     for (name, old, new) in changes {
         let marker = change_marker(old, new);
         if verbose {
-            println!(
+            writeln!(
+                output,
                 "  {} {}{}",
                 colours.marker(marker),
                 name,
                 change_detail(old, new, "  ")
-            );
+            )?;
         } else {
-            println!("  {} {}", colours.marker(marker), name);
+            writeln!(output, "  {} {}", colours.marker(marker), name)?;
         }
     }
+    Ok(())
 }
 
-fn print_package_changes(report: &CheckReport, colours: &Colours) {
+fn print_package_changes<W: Write>(
+    output: &mut W,
+    report: &CheckReport,
+    colours: &Colours,
+) -> io::Result<()> {
     let changes = map_changes(&report.before.packages, &report.after.packages);
     if changes.is_empty() {
-        return;
+        return Ok(());
     }
-    println!("\n{}", colours.heading("Declared packages"));
+    writeln!(output, "\n{}", colours.heading("Declared packages"))?;
     for (name, old, new) in changes {
         let marker = change_marker(old, new);
         let detail = match (old, new) {
@@ -322,8 +436,9 @@ fn print_package_changes(report: &CheckReport, colours: &Colours) {
             }
             (None, None) => unreachable!(),
         };
-        println!("  {} {name}  {detail}", colours.marker(marker));
+        writeln!(output, "  {} {name}  {detail}", colours.marker(marker))?;
     }
+    Ok(())
 }
 
 fn map_changes<'a, T: PartialEq>(

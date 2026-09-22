@@ -34,6 +34,12 @@ nx update list      # show the latest cached report
 systemctl --user status nxd
 ```
 
+Interactive reports open in `$PAGER` or `less -R`. Use `--no-pager` to print
+directly. In a debug build, `nx notification test` sends a notification for the
+latest cached report immediately, without contacting the daemon; its View
+changes action opens that same debug binary in Kitty. Pass `--flake` and
+`--configuration` when they are not set in `config.toml`.
+
 The package can also be run directly:
 
 ```sh
