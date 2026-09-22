@@ -7,7 +7,9 @@ use std::env;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info};
 
 #[derive(Clone, Copy)]
@@ -34,6 +36,54 @@ struct ChangeCounts {
 
 struct Colours {
     enabled: bool,
+}
+
+struct Spinner {
+    stop: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Spinner {
+    fn start(enabled: bool) -> Self {
+        if !enabled {
+            return Self {
+                stop: None,
+                thread: None,
+            };
+        }
+
+        let (stop, receiver) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut frame = 0;
+            let mut shown = false;
+            while let Err(RecvTimeoutError::Timeout) =
+                receiver.recv_timeout(Duration::from_millis(100))
+            {
+                eprint!("\r{} Checking for updates...", frames[frame]);
+                let _ = std::io::stderr().flush();
+                shown = true;
+                frame = (frame + 1) % frames.len();
+            }
+            if shown {
+                eprint!("\r\x1b[2K");
+                let _ = std::io::stderr().flush();
+            }
+        });
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Colours {
@@ -81,6 +131,11 @@ fn main() {
 }
 
 fn run(options: CliOptions) -> nx::Result<()> {
+    let spinner = Spinner::start(
+        matches!(options.command, CliCommand::Check)
+            && options.log_verbosity == 0
+            && std::io::stderr().is_terminal(),
+    );
     let target = ReportTarget {
         flake: options.request.flake.clone(),
         configuration: options.request.host.clone(),
@@ -106,6 +161,7 @@ fn run(options: CliOptions) -> nx::Result<()> {
         };
         request_daemon(&options.socket, request)?
     };
+    drop(spinner);
     print_report(&report, options.report_verbose);
     Ok(())
 }
