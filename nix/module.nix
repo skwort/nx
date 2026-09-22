@@ -102,7 +102,7 @@ in
       description = "nx NixOS update daemon";
       wantedBy = [ "default.target" ];
       after = [ "graphical-session.target" ];
-      path = [ configuredPackage ];
+      path = [ configuredPackage pkgs.less ];
       serviceConfig = {
         ExecStart = "${configuredPackage}/bin/nxd";
         Restart = "on-failure";
