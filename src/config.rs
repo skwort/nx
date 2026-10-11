@@ -74,6 +74,8 @@ pub struct NotificationConfig {
     #[serde(default = "notifications_enabled")]
     pub enabled: bool,
     pub view_command: Option<Vec<String>>,
+    #[serde(default)]
+    pub ntfy: NtfyConfig,
 }
 
 impl Default for NotificationConfig {
@@ -81,7 +83,64 @@ impl Default for NotificationConfig {
         Self {
             enabled: true,
             view_command: None,
+            ntfy: NtfyConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NtfyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub topic_url: Option<String>,
+    #[serde(default)]
+    pub mode: NtfyMode,
+    pub token_file: Option<PathBuf>,
+    pub token_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NtfyMode {
+    #[default]
+    Summary,
+    Detailed,
+}
+
+impl NtfyConfig {
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let url = self
+            .topic_url
+            .as_deref()
+            .ok_or("notifications.ntfy.topic_url is required")?;
+        let parsed = reqwest::Url::parse(url)?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || parsed.path() == "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err("notifications.ntfy.topic_url must be an HTTP(S) topic URL without query or fragment".into());
+        }
+        if self.token_file.is_some() && self.token_env.is_some() {
+            return Err("configure only one of notifications.ntfy.token_file or token_env".into());
+        }
+        if self
+            .token_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err("notifications.ntfy.token_file must be an absolute path".into());
+        }
+        if self.token_env.as_deref().is_some_and(str::is_empty) {
+            return Err("notifications.ntfy.token_env cannot be empty".into());
+        }
+        Ok(())
     }
 }
 

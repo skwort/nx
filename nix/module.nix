@@ -20,6 +20,19 @@ let
     };
     notifications = {
       enabled = cfg.notifications.enable;
+      ntfy = {
+        enabled = cfg.notifications.ntfy.enable;
+        mode = cfg.notifications.ntfy.mode;
+      }
+      // lib.optionalAttrs (cfg.notifications.ntfy.topicUrl != null) {
+        topic_url = cfg.notifications.ntfy.topicUrl;
+      }
+      // lib.optionalAttrs (cfg.notifications.ntfy.tokenFile != null) {
+        token_file = cfg.notifications.ntfy.tokenFile;
+      }
+      // lib.optionalAttrs (cfg.notifications.ntfy.tokenEnv != null) {
+        token_env = cfg.notifications.ntfy.tokenEnv;
+      };
     }
     // lib.optionalAttrs (cfg.notifications.viewCommand != [ ]) {
       view_command = cfg.notifications.viewCommand;
@@ -84,25 +97,57 @@ in
 
       viewCommand = lib.mkOption {
         type = lib.types.listOf lib.types.str;
-        default = [
-          "${pkgs.kitty}/bin/kitty"
-          "nx"
-          "update"
-          "list"
-        ];
+        default = [ ];
         description = "Command launched by the notification's View changes action.";
+      };
+
+      ntfy = {
+        enable = lib.mkEnableOption "ntfy update notifications";
+        topicUrl = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "https://ntfy.example.com/nixos-updates";
+          description = "Full URL of the ntfy topic.";
+        };
+        mode = lib.mkOption {
+          type = lib.types.enum [ "summary" "detailed" ];
+          default = "summary";
+          description = "Send a compact message or attach the full report.";
+        };
+        tokenFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/run/secrets/nx-ntfy-token";
+          description = "Absolute path to a runtime token file; contents are read by nxd.";
+        };
+        tokenEnv = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "NX_NTFY_TOKEN";
+          description = "Name of an environment variable containing the ntfy token in the nxd service.";
+        };
       };
     };
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !cfg.notifications.ntfy.enable || cfg.notifications.ntfy.topicUrl != null;
+        message = "services.nx.notifications.ntfy.topicUrl is required when ntfy is enabled";
+      }
+      {
+        assertion = cfg.notifications.ntfy.tokenFile == null || cfg.notifications.ntfy.tokenEnv == null;
+        message = "configure only one ntfy token source";
+      }
+    ];
     environment.systemPackages = [ configuredPackage ];
 
     systemd.user.services.nxd = {
       description = "nx NixOS update daemon";
       wantedBy = [ "default.target" ];
       after = [ "graphical-session.target" ];
-      path = [ configuredPackage pkgs.less ];
+      path = [ configuredPackage pkgs.less pkgs.xdg-terminal-exec ];
       serviceConfig = {
         ExecStart = "${configuredPackage}/bin/nxd";
         Restart = "on-failure";

@@ -23,13 +23,7 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = ../Cargo.lock;
 
   nativeBuildInputs = [ makeWrapper ];
-
-  preCheck = ''
-    export XDG_CACHE_HOME="$TMPDIR/cache"
-    export XDG_CONFIG_HOME="$TMPDIR/config"
-    export XDG_RUNTIME_DIR="$TMPDIR/runtime"
-    mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
-  '';
+  doCheck = false;
 
   postInstall = ''
     for program in nx nxd; do
