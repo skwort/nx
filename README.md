@@ -24,8 +24,9 @@ services.nx = {
 The configuration name defaults to the system hostname. The daemon waits 60
 seconds after startup and checks every six hours. Desktop notifications are
 enabled by default; their View changes action uses `xdg-terminal-exec` to open
-your preferred terminal. Set `services.nx.notifications.viewCommand` to a list
-of command arguments if your terminal needs a custom launcher, or set
+your preferred terminal. The Nix package includes this launcher. Set
+`services.nx.notifications.viewCommand` to a list of command arguments if your
+terminal needs a custom launcher, or set
 `services.nx.notifications.enable = false` to disable desktop delivery.
 
 To also publish updates to a self-hosted ntfy topic:

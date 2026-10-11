@@ -4,6 +4,7 @@
   makeWrapper,
   nix,
   rustPlatform,
+  xdg-terminal-exec,
 }:
 
 rustPlatform.buildRustPackage {
@@ -32,6 +33,7 @@ rustPlatform.buildRustPackage {
           lib.makeBinPath [
             coreutils
             nix
+            xdg-terminal-exec
           ]
         }
     done
