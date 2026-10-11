@@ -1,6 +1,6 @@
 use nx::{
-    AppPaths, CheckRequest, Config, DaemonRequest, DaemonResponse, LogMode, ReportTarget, check,
-    init_logging, load_latest_report, prepare_update_notification, show_notification,
+    AppPaths, CheckRequest, Config, DaemonRequest, DaemonResponse, LogMode, NotificationDispatcher,
+    ReportTarget, check, init_logging, load_latest_report,
 };
 use std::env;
 use std::fs;
@@ -47,7 +47,7 @@ fn run() -> nx::Result<()> {
     let startup_delay = config.daemon.startup_delay()?;
     let socket = socket_override
         .or(config.daemon.socket.clone())
-        .unwrap_or(paths.socket);
+        .unwrap_or(paths.socket.clone());
 
     if let Some(parent) = socket.parent() {
         fs::create_dir_all(parent)?;
@@ -68,14 +68,13 @@ fn run() -> nx::Result<()> {
             )?,
             offline: false,
         };
-        start_scheduler(
-            worker.clone(),
-            request,
-            startup_delay,
-            interval,
-            config.notifications.enabled,
-            config.notifications.view_command,
-        );
+        let target = ReportTarget {
+            flake: request.flake.clone(),
+            configuration: request.host.clone(),
+        };
+        let dispatcher =
+            NotificationDispatcher::new(config.notifications, &target, &paths.cache_dir)?;
+        start_scheduler(worker.clone(), request, startup_delay, interval, dispatcher);
     }
 
     for stream in listener.incoming() {
@@ -166,8 +165,7 @@ fn start_scheduler(
     request: CheckRequest,
     startup_delay: Duration,
     interval: Duration,
-    notifications_enabled: bool,
-    view_command: Option<Vec<String>>,
+    dispatcher: NotificationDispatcher,
 ) {
     thread::spawn(move || {
         let target = ReportTarget {
@@ -186,29 +184,13 @@ fn start_scheduler(
             "first update check scheduled"
         );
         thread::sleep(startup_delay);
-        let mut last_notified = None;
-
         loop {
             info!("starting scheduled update check");
             match worker.run(&request) {
                 Ok(report) => {
                     info!("scheduled update check completed");
-                    if notifications_enabled {
-                        match prepare_update_notification(&report) {
-                            Ok(Some(update))
-                                if last_notified.as_ref() != Some(&update.fingerprint) =>
-                            {
-                                match show_notification(&update, view_command.clone()) {
-                                    Ok(()) => last_notified = Some(update.fingerprint),
-                                    Err(error) => {
-                                        warn!(%error, "failed to send desktop notification")
-                                    }
-                                }
-                            }
-                            Ok(Some(_)) => debug!("update notification already sent"),
-                            Ok(None) => last_notified = None,
-                            Err(error) => warn!(%error, "failed to prepare desktop notification"),
-                        }
+                    if let Err(error) = dispatcher.dispatch(&report, false) {
+                        warn!(%error, "notification delivery failed");
                     }
                 }
                 Err(error) => warn!(%error, "scheduled update check failed"),

@@ -14,11 +14,9 @@ mod notifications;
 mod protocol;
 mod report_store;
 
-pub use config::{AppPaths, Config};
+pub use config::{AppPaths, Config, NotificationConfig, NtfyConfig, NtfyMode};
 pub use logging::{LogMode, init_logging};
-#[cfg(debug_assertions)]
-pub use notifications::show_test_notification;
-pub use notifications::{UpdateNotification, prepare_update_notification, show_notification};
+pub use notifications::{NotificationDispatcher, UpdateNotification, prepare_update_notification};
 pub use protocol::{DaemonRequest, DaemonResponse};
 pub use report_store::{ReportTarget, load_latest_report};
 

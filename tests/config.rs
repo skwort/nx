@@ -1,4 +1,4 @@
-use nx::Config;
+use nx::{Config, NtfyMode};
 use std::path::Path;
 use std::time::Duration;
 
@@ -40,4 +40,31 @@ fn missing_config_uses_empty_defaults() {
         Duration::from_secs(60)
     );
     assert!(config.notifications.enabled);
+    assert!(!config.notifications.ntfy.enabled);
+}
+
+#[test]
+fn loads_ntfy_and_rejects_conflicting_token_sources() {
+    let config: Config = toml::from_str(
+        r#"
+        [notifications]
+        enabled = false
+        [notifications.ntfy]
+        enabled = true
+        topic_url = "https://ntfy.example.com/updates"
+        mode = "detailed"
+        token_file = "/run/secrets/ntfy-token"
+    "#,
+    )
+    .unwrap();
+    assert!(!config.notifications.enabled);
+    assert!(matches!(config.notifications.ntfy.mode, NtfyMode::Detailed));
+    config.notifications.ntfy.validate().unwrap();
+
+    let mut ntfy = config.notifications.ntfy;
+    ntfy.token_env = Some("NX_NTFY_TOKEN".to_owned());
+    assert!(ntfy.validate().is_err());
+    ntfy.token_file = None;
+    ntfy.topic_url = Some("file:///tmp/topic".to_owned());
+    assert!(ntfy.validate().is_err());
 }

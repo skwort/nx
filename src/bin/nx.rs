@@ -1,9 +1,8 @@
 use nx::{
     AppPaths, CheckReport, CheckRequest, Config, DaemonRequest, DaemonResponse, LogMode,
-    ReportTarget, check, init_logging, load_latest_report,
+    NotificationConfig, NotificationDispatcher, ReportTarget, check, init_logging,
+    load_latest_report,
 };
-#[cfg(debug_assertions)]
-use nx::{UpdateNotification, prepare_update_notification, show_test_notification};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
@@ -19,7 +18,6 @@ use tracing::{debug, error, info};
 enum CliCommand {
     Check,
     List,
-    #[cfg(debug_assertions)]
     TestNotification,
 }
 
@@ -31,6 +29,8 @@ struct CliOptions {
     log_verbosity: u8,
     direct: bool,
     socket: PathBuf,
+    notifications: NotificationConfig,
+    cache_dir: PathBuf,
 }
 
 #[derive(Default)]
@@ -146,7 +146,6 @@ fn run(options: CliOptions) -> nx::Result<()> {
         flake: options.request.flake.clone(),
         configuration: options.request.host.clone(),
     };
-    #[cfg(debug_assertions)]
     if matches!(options.command, CliCommand::TestNotification) {
         let report = load_latest_report(&target)?.ok_or_else(|| {
             format!(
@@ -155,25 +154,24 @@ fn run(options: CliOptions) -> nx::Result<()> {
                 target.configuration
             )
         })?;
-        let update = prepare_update_notification(&report)?.unwrap_or(UpdateNotification {
-            fingerprint: String::new(),
-            body: "No updates in the latest cached report".to_owned(),
-        });
-        let command = vec![
-            "kitty".to_owned(),
-            "--title".to_owned(),
-            "nx updates (test)".to_owned(),
-            env::current_exe()?.to_string_lossy().into_owned(),
-            "update".to_owned(),
-            "list".to_owned(),
-            "--direct".to_owned(),
-            "--flake".to_owned(),
-            target.flake.to_string_lossy().into_owned(),
-            "--configuration".to_owned(),
-            target.configuration,
-        ];
-        println!("Sending test notification; choose View changes or dismiss it to finish.");
-        return show_test_notification(&update, command);
+        let mut notifications = options.notifications;
+        if notifications.view_command.is_none() {
+            notifications.view_command = Some(vec![
+                "xdg-terminal-exec".to_owned(),
+                "--".to_owned(),
+                env::current_exe()?.to_string_lossy().into_owned(),
+                "update".to_owned(),
+                "list".to_owned(),
+                "--direct".to_owned(),
+                "--flake".to_owned(),
+                target.flake.to_string_lossy().into_owned(),
+                "--configuration".to_owned(),
+                target.configuration.clone(),
+            ]);
+        }
+        let dispatcher = NotificationDispatcher::new(notifications, &target, &options.cache_dir)?;
+        println!("Sending test notification through enabled channels.");
+        return dispatcher.dispatch(&report, true);
     }
     let report = if options.direct {
         match options.command {
@@ -188,14 +186,12 @@ fn run(options: CliOptions) -> nx::Result<()> {
                     target.configuration
                 )
             })?,
-            #[cfg(debug_assertions)]
             CliCommand::TestNotification => unreachable!(),
         }
     } else {
         let request = match options.command {
             CliCommand::Check => DaemonRequest::Check(options.request),
             CliCommand::List => DaemonRequest::List(target),
-            #[cfg(debug_assertions)]
             CliCommand::TestNotification => unreachable!(),
         };
         request_daemon(&options.socket, request)?
@@ -221,7 +217,6 @@ fn parse_args() -> nx::Result<CliOptions> {
         match arg.as_str() {
             "update" | "check" => {}
             "list" => command = CliCommand::List,
-            #[cfg(debug_assertions)]
             "notification" if args.next().as_deref() == Some("test") => {
                 command = CliCommand::TestNotification;
             }
@@ -242,7 +237,6 @@ fn parse_args() -> nx::Result<CliOptions> {
             "--socket" => socket = Some(PathBuf::from(args.next().ok_or("--socket needs a path")?)),
             "-h" | "--help" => {
                 println!("Usage:\n  nx update check [OPTIONS]\n  nx update list [OPTIONS]");
-                #[cfg(debug_assertions)]
                 println!("  nx notification test [OPTIONS]");
                 println!(
                     "\nOptions:\n  --flake PATH\n  --configuration NAME\n  --offline\n  --verbose\n  --no-pager\n  -v, -vv\n  --direct\n  --socket PATH"
@@ -272,6 +266,8 @@ fn parse_args() -> nx::Result<CliOptions> {
         log_verbosity,
         direct,
         socket: socket.or(config.daemon.socket).unwrap_or(paths.socket),
+        notifications: config.notifications,
+        cache_dir: paths.cache_dir,
     })
 }
 
